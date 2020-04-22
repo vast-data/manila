@@ -1,4 +1,4 @@
-# from https://github.com/weka-io/easypy
+# from https://github.com/real-easypy/easypy
 
 
 class Bunch(dict):
