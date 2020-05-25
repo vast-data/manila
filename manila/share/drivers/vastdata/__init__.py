@@ -39,6 +39,7 @@ vast_mgmt_password = 123456
 import re
 import socket
 from contextlib import contextmanager
+import random
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -115,15 +116,22 @@ class VASTShareDriver(driver.ShareDriver):
         backend_name = self.configuration.safe_get('share_backend_name')
         self._backend_name = backend_name or self.__class__.__name__
 
+        manila_view = "manila"
+        export = self._get_export(manila_view)
+        if not export:
+            policy = self._get_policy("default")
+            data = dict(name=manila_view, path=self._root_export, policy_id=policy.id, create_dir=True, protocols=['NFS'])
+            self.vms_session.post("views", data=data)
+
         LOG.debug('setup complete')
 
     @contextmanager
-    def _mounted_share(self, share):
-        share_id = share['id']
-        volume = self._to_volume_path(share)
-        mp = "/tmp/manila/{}".format(share_id)
+    def _mounted_root(self):
+        vips = self._get_vips()
+        vip = random.choice(vips).ip
+        mp = "/tmp/manila/{}".format(vip)
         utils.execute("mkdir", "-p", mp)
-        utils.execute("mount", "-t", "nfs", volume, mp, run_as_root=True)
+        utils.execute("mount", "-t", "nfs", "{}:{}".format(vip, self._root_export), mp, run_as_root=True)
         try:
             yield mp
         finally:
@@ -166,9 +174,11 @@ class VASTShareDriver(driver.ShareDriver):
             name.partition(",")[-1]: value
             for name, value in zip(ret.prop_list, last_sample)})
 
-    def _to_volume_path(self, manila_share):
+    def _to_volume_path(self, manila_share, root=None):
+        if not root:
+            root = self._root_export
         share_id = manila_share['id']
-        return "{self._root_export}/manila-{share_id}".format(**locals())
+        return "{root}/manila-{share_id}".format(**locals())
 
     def _get_vips(self):
         vips = [
@@ -236,7 +246,7 @@ class VASTShareDriver(driver.ShareDriver):
             self.vms_session.patch("views/{}".format(export.id), data=dict(policy_id=policy.id))
 
         return [dict(
-            path='{vip.ip}:/{path}'.format(vip=vip, path=path),
+            path='{vip.ip}:{path}'.format(vip=vip, path=path),
             metadata=dict(quota_id=quota.id),
             is_admin_only=False,
         ) for vip in vips]
@@ -267,9 +277,11 @@ class VASTShareDriver(driver.ShareDriver):
         else:
             LOG.warning("policy %s not found on VAST, skipping delete", share_id)
 
-        with self._mounted_share(share) as path:
-            deleted_path = "{self._root_export}/manila-deleted-{share_id}".format(**locals())
-            utils.execute("mv", path, deleted_path, run_as_root=True)
+        with self._mounted_root() as mount:
+            src = self._to_volume_path(share, mount)
+            dst = "{}/deleted/{}".format(mount, share_id)
+            utils.execute("mkdir", "-p", "{}/deleted".format(mount), run_as_root=True)
+            utils.execute("mv", src, dst, run_as_root=True)
 
     def update_access(self, context, share, access_rules, add_rules,
                       delete_rules, share_server=None):
@@ -346,8 +358,10 @@ class VASTShareDriver(driver.ShareDriver):
 
     def delete_snapshot(self, context, snapshot, share_server):
         """Is called to remove share."""
-        snapshot = self.vms_session.snapshots(name=snapshot['name'])
-        self.vms_session.delete("snapshots/{}".format(snapshot.id))
+        name = snapshot['name']
+        snapshots = self.vms_session.snapshots(name=name)
+        assert len(snapshots) == 1, "Too many snapshots with name {!r}".format(name)
+        self.vms_session.delete("snapshots/{}".format(snapshots[0].id))
 
     def get_network_allocations_number(self):
         return 0
