@@ -13,28 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""
-VAST's Share Driver
-
-
-Configuration:
-
-
-[DEFAULT]
-enabled_share_backends = vast_backend_11
-
-[vast_backend_11]
-share_driver = manila.share.drivers.vastdata.VASTShareDriver
-share_backend_name = vast11
-snapshot_support = true
-driver_handles_share_servers = false
-vast_mgmt_host = v11
-vast_vippool_name = vippool-1
-vast_root_export = manila
-vast_mgmt_user = admin
-vast_mgmt_password = 123456
-
-"""
 
 import re
 import socket
