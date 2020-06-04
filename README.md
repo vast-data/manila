@@ -12,7 +12,7 @@ It adds integration with VAST's storage system.
 1. Download the appropriate patch file from the releases page and apply using the `patch` command:
 
 ```bash
-VERSION=v0.3  # for example
+VERSION=0.3  # for example
 wget https://github.com/vast-data/manila/releases/download/vast-$VERSION/vast-manila.patch -O /tmp/vast-manila.patch
 cd /usr/lib/python2.7/site-packages/manila/
 patch -p2 < /tmp/vast-manila.patch
