@@ -58,8 +58,8 @@ CONF = cfg.CONF
 CONF.register_opts(OPTS)
 
 _MANILA_TO_VAST_ACCESS_LEVEL = {
-    constants.ACCESS_LEVEL_RW: 'READ_WRITE',
-    constants.ACCESS_LEVEL_RO: 'READ_ONLY',
+    constants.ACCESS_LEVEL_RW: 'nfs_read_write',
+    constants.ACCESS_LEVEL_RO: 'nfs_read_only',
 }
 
 
@@ -203,7 +203,7 @@ class VASTShareDriver(driver.ShareDriver):
 
         policy = self._get_policy(share_id)
         if not policy:
-            data = dict(name=share_id, squash="ROOT_SQUASH", access_type="ACCESS_DENIED")
+            data = dict(name=share_id)
             policy = self.vms_session.post("viewpolicies", data=data)
 
         quota = self._get_quota(share_id)
@@ -295,13 +295,11 @@ class VASTShareDriver(driver.ShareDriver):
             LOG.info("resolved %s: %s", hostname, ", ".join(ipaddrlist))
             return ipaddrlist
 
-        allowed_hosts = ",".join(sorted(
-            ip for rule in access_rules if rule for ip in reverse_lookup(rule['access_to'])
-        ))
+        allowed_hosts = [ip for rule in access_rules if rule for ip in reverse_lookup(rule['access_to'])]
 
         LOG.info("Changing access on %s -> %s (%s)", export, allowed_hosts, access_type)
 
-        data = dict(name=share_id, squash="ROOT_SQUASH", access_type=access_type, allowed_hosts=allowed_hosts)
+        data = {access_type: allowed_hosts, "name": share_id}
         policy = self._get_policy(share_id)
         if policy:
             self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
