@@ -296,7 +296,8 @@ class VASTShareDriver(driver.ShareDriver):
         LOG.info("Changing access on %s -> %s (%s)", export, allowed_hosts, access_types)
 
         access_type_mapping = dict.fromkeys(access_types, allowed_hosts)
-        data = {**access_type_mapping, "name": share_id, "nfs_no_squash": ["*"], "nfs_root_squash": ["*"]}
+        data = {"name": share_id, "nfs_no_squash": ["*"], "nfs_root_squash": ["*"]}
+        data.update(access_type_mapping)
         policy = self._get_policy(share_id)
         if policy:
             self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
