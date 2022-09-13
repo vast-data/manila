@@ -277,11 +277,7 @@ class VASTShareDriver(driver.ShareDriver):
         if not levels:
             return
 
-        if len(levels) > 1:
-            raise exception.InvalidShareAccess(
-                reason="Mixing access levels on the same share is not supported: %s" % levels)
-
-        access_type = _MANILA_TO_VAST_ACCESS_LEVEL[levels.pop()]
+        access_types = {_MANILA_TO_VAST_ACCESS_LEVEL[l] for l in levels}
 
         def reverse_lookup(dns):
             if RE_IS_IP.match(dns):
@@ -297,9 +293,10 @@ class VASTShareDriver(driver.ShareDriver):
 
         allowed_hosts = [ip for rule in access_rules if rule for ip in reverse_lookup(rule['access_to'])]
 
-        LOG.info("Changing access on %s -> %s (%s)", export, allowed_hosts, access_type)
+        LOG.info("Changing access on %s -> %s (%s)", export, allowed_hosts, access_types)
 
-        data = {access_type: allowed_hosts, "name": share_id}
+        access_type_mapping = dict.fromkeys(access_types, allowed_hosts)
+        data = {**access_type_mapping, "name": share_id, "nfs_no_squash": ["*"], "nfs_root_squash": ["*"]}
         policy = self._get_policy(share_id)
         if policy:
             self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
