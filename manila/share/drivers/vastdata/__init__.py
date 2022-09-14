@@ -291,13 +291,16 @@ class VASTShareDriver(driver.ShareDriver):
             LOG.info("resolved %s: %s", hostname, ", ".join(ipaddrlist))
             return ipaddrlist
 
-        allowed_hosts = [ip for rule in access_rules if rule for ip in reverse_lookup(rule['access_to'])]
+        allowed_hosts = {
+            _MANILA_TO_VAST_ACCESS_LEVEL[rule['access_level']]:
+            [ip for ip in reverse_lookup(rule['access_to'])]
+            for rule in access_rules
+        }
 
         LOG.info("Changing access on %s -> %s (%s)", export, allowed_hosts, access_types)
 
-        access_type_mapping = dict.fromkeys(access_types, allowed_hosts)
         data = {"name": share_id, "nfs_no_squash": ["*"], "nfs_root_squash": ["*"]}
-        data.update(access_type_mapping)
+        data.update(allowed_hosts)
         policy = self._get_policy(share_id)
         if policy:
             self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
