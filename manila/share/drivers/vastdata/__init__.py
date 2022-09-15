@@ -75,7 +75,6 @@ OPTS = [
         secret=True),
 ]
 
-
 CONF = cfg.CONF
 CONF.register_opts(OPTS)
 
@@ -84,13 +83,11 @@ _MANILA_TO_VAST_ACCESS_LEVEL = {
     constants.ACCESS_LEVEL_RO: 'nfs_read_only',
 }
 
-
 RE_IS_IP = re.compile(r"\d+\.\d+\.\d+\.\d+")
 
 
 class VASTShareDriver(driver.ShareDriver):
-
-    VERSION = '1.0'    # driver version
+    VERSION = '1.0'  # driver version
 
     def __init__(self, *args, **kwargs):
         super(VASTShareDriver, self).__init__(False, *args, **kwargs)
@@ -120,7 +117,8 @@ class VASTShareDriver(driver.ShareDriver):
         export = self._get_export(manila_view)
         if not export:
             policy = self._get_policy("default")
-            data = dict(name=manila_view, path=self._root_export, policy_id=policy.id, create_dir=True, protocols=['NFS'])
+            data = dict(name=manila_view, path=self._root_export, policy_id=policy.id, create_dir=True,
+                        protocols=['NFS'])
             self.vms_session.post("views", data=data)
 
         LOG.debug('setup complete')
@@ -286,20 +284,18 @@ class VASTShareDriver(driver.ShareDriver):
     def update_access(self, context, share, access_rules, add_rules,
                       delete_rules, share_server=None):
 
+        if not (add_rules or delete_rules):
+            add_rules = access_rules
+
         if share['share_proto'] != 'NFS':
             return
 
-        validate_access_rules(access_rules)
+        validate_access_rules(add_rules)
 
         share_id = share['id']
 
         export = self._to_volume_path(share)
         LOG.info("Changing access on %s", share_server)
-        levels = {rule['access_level'] for rule in access_rules if rule}
-        if not levels:
-            return
-
-        access_types = {_MANILA_TO_VAST_ACCESS_LEVEL[l] for l in levels}
 
         def reverse_lookup(dns):
             if RE_IS_IP.match(dns):
@@ -313,21 +309,39 @@ class VASTShareDriver(driver.ShareDriver):
             LOG.info("resolved %s: %s", hostname, ", ".join(ipaddrlist))
             return ipaddrlist
 
-        allowed_hosts = {
-            _MANILA_TO_VAST_ACCESS_LEVEL[rule['access_level']]:
-            [ip for ip in reverse_lookup(rule['access_to'])]
-            for rule in access_rules
-        }
-
-        LOG.info("Changing access on %s -> %s (%s)", export, allowed_hosts, access_types)
-
         data = {"name": share_id, "nfs_no_squash": ["*"], "nfs_root_squash": ["*"]}
-        data.update(allowed_hosts)
+
         policy = self._get_policy(share_id)
-        if policy:
+
+        if add_rules:
+
+            allowed_hosts = {
+                _MANILA_TO_VAST_ACCESS_LEVEL[rule['access_level']]:
+                    [ip for ip in reverse_lookup(rule['access_to'])]
+                for rule in add_rules
+            }
+            LOG.info("Changing access on %s -> %s", export, allowed_hosts)
+
+            data.update(allowed_hosts)
+            if policy:
+                self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
+            else:
+                self.vms_session.post("viewpolicies", data=data)
+
+        elif delete_rules:
+
+            denied_hosts = {
+                _MANILA_TO_VAST_ACCESS_LEVEL[rule['access_level']]:
+                    [ip for ip in reverse_lookup(rule['access_to'])]
+                for rule in delete_rules or []
+            }
+
+            data.update(
+                {
+                    'nfs_read_write': set(policy.nfs_read_write).difference(denied_hosts.get('nfs_read_write', [])),
+                    'nfs_read_only': set(policy.nfs_read_only).difference(denied_hosts.get('nfs_read_only', []))
+                })
             self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
-        else:
-            self.vms_session.post("viewpolicies", data=data)
 
     def _resize_share(self, share, new_size):
         share_id = share['id']
@@ -367,7 +381,6 @@ class VASTShareDriver(driver.ShareDriver):
 
 
 def validate_access_rules(access_rules):
-
     allowed_types = {'ip'}
     allowed_levels = _MANILA_TO_VAST_ACCESS_LEVEL.keys()
 
