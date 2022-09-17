@@ -265,6 +265,15 @@ class VASTShareDriver(driver.ShareDriver):
         if not (add_rules or delete_rules):
             add_rules = access_rules
 
+        LOG.warning(" ----------------------- Input params ----------------------------")
+        LOG.warning(f"context: {context}")
+        LOG.warning(f"share: {share}")
+        LOG.warning(f"access rules: {access_rules}")
+        LOG.warning(f"add rules: {add_rules}")
+        LOG.warning(f"delete rules: {delete_rules}")
+        LOG.warning(f"share_server: {share_server}")
+        LOG.warning("------------------------------------------------------------------")
+
         if share['share_proto'] != 'NFS':
             return
 
@@ -289,7 +298,11 @@ class VASTShareDriver(driver.ShareDriver):
 
         data = {"name": share_id, "nfs_no_squash": ["*"], "nfs_root_squash": ["*"]}
 
+        LOG.warning(f"Initial data >>> : {data}")
+
         policy = self._get_policy(share_id)
+
+        LOG.warning(f"Found policy: {policy}")
 
         if add_rules:
 
@@ -298,6 +311,9 @@ class VASTShareDriver(driver.ShareDriver):
                     [ip for ip in reverse_lookup(rule['access_to'])]
                 for rule in add_rules
             }
+
+            LOG.warning(f"Allowed hosts: {allowed_hosts}")
+
             LOG.info("Changing access on %s -> %s", export, allowed_hosts)
 
             data.update(allowed_hosts)
@@ -314,12 +330,18 @@ class VASTShareDriver(driver.ShareDriver):
                 for rule in delete_rules or []
             }
 
+            LOG.warning(f"Denied hosts: {denied_hosts}")
+
             data.update(
                 {
                     'nfs_read_write': set(policy.nfs_read_write).difference(denied_hosts.get('nfs_read_write', [])),
                     'nfs_read_only': set(policy.nfs_read_only).difference(denied_hosts.get('nfs_read_only', []))
                 })
+
+            LOG.warning(f"Upated data for deny action: {data}")
             self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
+
+            LOG.warning("---------------------- FINISH ----------------------------------------------")
 
     def _resize_share(self, share, new_size):
         share_id = share['id']
