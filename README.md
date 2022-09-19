@@ -8,11 +8,20 @@ It adds integration with VAST's storage system.
 
 # Deployment Instructions
 
+#### Prerequisites
+
+First of all, you should have the appropriate version of Opestack installed.
+
+2 versions of Openstack are currently supported:
+
+- [Rocky](https://docs.openstack.org/rocky/) - corresponds to the `0.3` patch version
+- [Stein](https://docs.openstack.org/stein/index.html) - corresponds to the `0.4` patch version
+
 
 1. Download the appropriate patch file from the releases page and apply using the `patch` command:
 
 ```bash
-VERSION=0.3  # for example
+VERSION=0.3  # Use appropriate version with accordance to description above.
 wget https://github.com/vast-data/manila/releases/download/vast-$VERSION/vast-manila.patch -O /tmp/vast-manila.patch
 cd /usr/lib/python2.7/site-packages/manila/
 patch -p2 < /tmp/vast-manila.patch
