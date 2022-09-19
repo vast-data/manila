@@ -71,7 +71,13 @@ manila snapshot-delete vast-share1
 
 ## Troubleshooting
 
-* Logs are available under `/var/log/manila`
+* Logs are available via journalctl:
+```
+  journalctl  -u   devstack@m-shr.service
+  journalctl  -u   devstack@m-api.service
+  journalctl  -u   devstack@m-sch
+  journalctl  -u   devstack@m-shr
+```
 * In some cases it might be necessary to restart other manila services:
     ```bash
     systemctl restart openstack-manila-scheduler.service
