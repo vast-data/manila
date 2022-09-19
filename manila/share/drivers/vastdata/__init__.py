@@ -53,22 +53,19 @@ OPTS = [
         secret=True),
 ]
 
-
 CONF = cfg.CONF
 CONF.register_opts(OPTS)
 
 _MANILA_TO_VAST_ACCESS_LEVEL = {
-    constants.ACCESS_LEVEL_RW: 'READ_WRITE',
-    constants.ACCESS_LEVEL_RO: 'READ_ONLY',
+    constants.ACCESS_LEVEL_RW: 'nfs_read_write',
+    constants.ACCESS_LEVEL_RO: 'nfs_read_only',
 }
-
 
 RE_IS_IP = re.compile(r"\d+\.\d+\.\d+\.\d+")
 
 
 class VASTShareDriver(driver.ShareDriver):
-
-    VERSION = '1.0'    # driver version
+    VERSION = '1.0'  # driver version
 
     def __init__(self, *args, **kwargs):
         super(VASTShareDriver, self).__init__(False, *args, **kwargs)
@@ -98,7 +95,8 @@ class VASTShareDriver(driver.ShareDriver):
         export = self._get_export(manila_view)
         if not export:
             policy = self._get_policy("default")
-            data = dict(name=manila_view, path=self._root_export, policy_id=policy.id, create_dir=True, protocols=['NFS'])
+            data = dict(name=manila_view, path=self._root_export, policy_id=policy.id, create_dir=True,
+                        protocols=['NFS'])
             self.vms_session.post("views", data=data)
 
         LOG.debug('setup complete')
@@ -203,7 +201,7 @@ class VASTShareDriver(driver.ShareDriver):
 
         policy = self._get_policy(share_id)
         if not policy:
-            data = dict(name=share_id, squash="ROOT_SQUASH", access_type="ACCESS_DENIED")
+            data = dict(name=share_id)
             policy = self.vms_session.post("viewpolicies", data=data)
 
         quota = self._get_quota(share_id)
@@ -261,52 +259,40 @@ class VASTShareDriver(driver.ShareDriver):
             utils.execute("mkdir", "-p", "{}/deleted".format(mount), run_as_root=True)
             utils.execute("mv", src, dst, run_as_root=True)
 
-    def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, share_server=None):
+    def update_access(self, context, share, access_rules, add_rules, delete_rules, share_server=None):
+
+        if not (add_rules or delete_rules):
+            add_rules = access_rules
 
         if share['share_proto'] != 'NFS':
             return
 
-        validate_access_rules(access_rules)
+        validate_access_rules(add_rules)
 
         share_id = share['id']
 
         export = self._to_volume_path(share)
+
         LOG.info("Changing access on %s", share_server)
-        levels = {rule['access_level'] for rule in access_rules if rule}
-        if not levels:
-            return
+        data = {"name": share_id, "nfs_no_squash": ["*"], "nfs_root_squash": ["*"]}
 
-        if len(levels) > 1:
-            raise exception.InvalidShareAccess(
-                reason="Mixing access levels on the same share is not supported: %s" % levels)
-
-        access_type = _MANILA_TO_VAST_ACCESS_LEVEL[levels.pop()]
-
-        def reverse_lookup(dns):
-            if RE_IS_IP.match(dns):
-                return [dns]
-            try:
-                hostname, aliaslist, ipaddrlist = socket.gethostbyname_ex(dns)
-            except socket.gaierror as exc:
-                LOG.error("Failed to resolve host '%s': %s (ignoring)", dns, exc)
-                return []
-
-            LOG.info("resolved %s: %s", hostname, ", ".join(ipaddrlist))
-            return ipaddrlist
-
-        allowed_hosts = ",".join(sorted(
-            ip for rule in access_rules if rule for ip in reverse_lookup(rule['access_to'])
-        ))
-
-        LOG.info("Changing access on %s -> %s (%s)", export, allowed_hosts, access_type)
-
-        data = dict(name=share_id, squash="ROOT_SQUASH", access_type=access_type, allowed_hosts=allowed_hosts)
         policy = self._get_policy(share_id)
-        if policy:
+        if add_rules:
+            policy_rules = policy_payload_from_rules(rules=add_rules, policy=policy, action="update")
+            data.update(policy_rules)
+
+            LOG.info("Changing access on {0}. Rules: {1}".format(export, policy_rules))
+            if policy:
+                self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
+            else:
+                self.vms_session.post("viewpolicies", data=data)
+
+        elif delete_rules:
+            policy_rules = policy_payload_from_rules(rules=delete_rules, policy=policy, action="deny")
+            LOG.info("Changing access on {0}. Rules: {1}".format(export, policy_rules))
+            data.update(policy_rules)
+
             self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
-        else:
-            self.vms_session.post("viewpolicies", data=data)
 
     def _resize_share(self, share, new_size):
         share_id = share['id']
@@ -345,8 +331,57 @@ class VASTShareDriver(driver.ShareDriver):
         return 0
 
 
-def validate_access_rules(access_rules):
+def policy_payload_from_rules(rules, policy, action):
+    """Convert list of manila rules into vast compatible payload for updating/creating policy."""
 
+    def reverse_lookup(dns):
+        if RE_IS_IP.match(dns):
+            return [dns]
+        try:
+            hostname, aliaslist, ipaddrlist = socket.gethostbyname_ex(dns)
+        except socket.gaierror as exc:
+            LOG.error("Failed to resolve host '%s': %s (ignoring)", dns, exc)
+            return []
+
+        LOG.info("resolved %s: %s", hostname, ", ".join(ipaddrlist))
+        return ipaddrlist
+
+    hosts = {
+        _MANILA_TO_VAST_ACCESS_LEVEL[rule['access_level']]:
+            {ip for ip in reverse_lookup(rule['access_to'])}
+        for rule in rules or []
+    }
+
+    _default_rules = set()
+
+    # Delete default_vast_policy on each update. There is no sense to keep * in list of allowed/denied hosts
+    # as user want to set particular ip/ips only.
+    _default_vast_policy = {"*"}
+    if action == "update":
+        rw = set(policy.nfs_read_write) | hosts.get('nfs_read_write', _default_rules)
+        ro = set(policy.nfs_read_only) | hosts.get('nfs_read_only', _default_rules)
+    elif action == "deny":
+        rw = set(policy.nfs_read_write) - hosts.get('nfs_read_write', _default_rules)
+        ro = set(policy.nfs_read_only) - hosts.get('nfs_read_only', _default_rules)
+    else:
+        raise ValueError("Invalid action")
+
+    # When policy created default access is "*" for read-write and read-only operations.
+    # After updating any of rules (rw or ro) we need to delete "*" to prevent ambiguous state when
+    # resource available for certain ip and for all range of ip addresses.
+    if len(rw) > 1:
+        rw -= _default_vast_policy
+
+    if len(ro) > 1:
+        rw -= _default_vast_policy
+
+    return {
+        'nfs_read_write': list(rw),
+        'nfs_read_only': list(ro)
+        }
+
+
+def validate_access_rules(access_rules):
     allowed_types = {'ip'}
     allowed_levels = _MANILA_TO_VAST_ACCESS_LEVEL.keys()
 
