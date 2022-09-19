@@ -259,20 +259,10 @@ class VASTShareDriver(driver.ShareDriver):
             utils.execute("mkdir", "-p", "{}/deleted".format(mount), run_as_root=True)
             utils.execute("mv", src, dst, run_as_root=True)
 
-    def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, share_server=None):
+    def update_access(self, context, share, access_rules, add_rules, delete_rules, share_server=None):
 
         if not (add_rules or delete_rules):
             add_rules = access_rules
-
-        LOG.warning(" ----------------------- Input params ----------------------------")
-        LOG.warning(f"context: {context}")
-        LOG.warning(f"share: {share}")
-        LOG.warning(f"access rules: {access_rules}")
-        LOG.warning(f"add rules: {add_rules}")
-        LOG.warning(f"delete rules: {delete_rules}")
-        LOG.warning(f"share_server: {share_server}")
-        LOG.warning("------------------------------------------------------------------")
 
         if share['share_proto'] != 'NFS':
             return
@@ -282,66 +272,27 @@ class VASTShareDriver(driver.ShareDriver):
         share_id = share['id']
 
         export = self._to_volume_path(share)
+
         LOG.info("Changing access on %s", share_server)
-
-        def reverse_lookup(dns):
-            if RE_IS_IP.match(dns):
-                return [dns]
-            try:
-                hostname, aliaslist, ipaddrlist = socket.gethostbyname_ex(dns)
-            except socket.gaierror as exc:
-                LOG.error("Failed to resolve host '%s': %s (ignoring)", dns, exc)
-                return []
-
-            LOG.info("resolved %s: %s", hostname, ", ".join(ipaddrlist))
-            return ipaddrlist
-
         data = {"name": share_id, "nfs_no_squash": ["*"], "nfs_root_squash": ["*"]}
 
-        LOG.warning(f"Initial data >>> : {data}")
-
         policy = self._get_policy(share_id)
-
-        LOG.warning(f"Found policy: {policy}")
-
         if add_rules:
+            policy_rules = policy_payload_from_rules(rules=add_rules, policy=policy, action="update")
+            data.update(policy_rules)
 
-            allowed_hosts = {
-                _MANILA_TO_VAST_ACCESS_LEVEL[rule['access_level']]:
-                    [ip for ip in reverse_lookup(rule['access_to'])]
-                for rule in add_rules
-            }
-
-            LOG.warning(f"Allowed hosts: {allowed_hosts}")
-
-            LOG.info("Changing access on %s -> %s", export, allowed_hosts)
-
-            data.update(allowed_hosts)
+            LOG.info("Changing access on {0}. Rules: {1}".format(export, policy_rules))
             if policy:
                 self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
             else:
                 self.vms_session.post("viewpolicies", data=data)
 
         elif delete_rules:
+            policy_rules = policy_payload_from_rules(rules=delete_rules, policy=policy, action="deny")
+            LOG.info("Changing access on {0}. Rules: {1}".format(export, policy_rules))
+            data.update(policy_rules)
 
-            denied_hosts = {
-                _MANILA_TO_VAST_ACCESS_LEVEL[rule['access_level']]:
-                    [ip for ip in reverse_lookup(rule['access_to'])]
-                for rule in delete_rules or []
-            }
-
-            LOG.warning(f"Denied hosts: {denied_hosts}")
-
-            data.update(
-                {
-                    'nfs_read_write': set(policy.nfs_read_write).difference(denied_hosts.get('nfs_read_write', [])),
-                    'nfs_read_only': set(policy.nfs_read_only).difference(denied_hosts.get('nfs_read_only', []))
-                })
-
-            LOG.warning(f"Upated data for deny action: {data}")
             self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
-
-            LOG.warning("---------------------- FINISH ----------------------------------------------")
 
     def _resize_share(self, share, new_size):
         share_id = share['id']
@@ -378,6 +329,56 @@ class VASTShareDriver(driver.ShareDriver):
 
     def get_network_allocations_number(self):
         return 0
+
+
+def policy_payload_from_rules(rules, policy, action):
+    """Convert list of manila rules into vast compatible payload for updating/creating policy."""
+
+    def reverse_lookup(dns):
+        if RE_IS_IP.match(dns):
+            return [dns]
+        try:
+            hostname, aliaslist, ipaddrlist = socket.gethostbyname_ex(dns)
+        except socket.gaierror as exc:
+            LOG.error("Failed to resolve host '%s': %s (ignoring)", dns, exc)
+            return []
+
+        LOG.info("resolved %s: %s", hostname, ", ".join(ipaddrlist))
+        return ipaddrlist
+
+    hosts = {
+        _MANILA_TO_VAST_ACCESS_LEVEL[rule['access_level']]:
+            {ip for ip in reverse_lookup(rule['access_to'])}
+        for rule in rules or []
+    }
+
+    _default_rules = set()
+
+    # Delete default_vast_policy on each update. There is no sense to keep * in list of allowed/denied hosts
+    # as user want to set particular ip/ips only.
+    _default_vast_policy = {"*"}
+    if action == "update":
+        rw = set(policy.nfs_read_write) | hosts.get('nfs_read_write', _default_rules)
+        ro = set(policy.nfs_read_only) | hosts.get('nfs_read_only', _default_rules)
+    elif action == "deny":
+        rw = set(policy.nfs_read_write) - hosts.get('nfs_read_write', _default_rules)
+        ro = set(policy.nfs_read_only) - hosts.get('nfs_read_only', _default_rules)
+    else:
+        raise ValueError("Invalid action")
+
+    # When policy created default access is "*" for read-write and read-only operations.
+    # After updating any of rules (rw or ro) we need to delete "*" to prevent ambiguous state when
+    # resource available for certain ip and for all range of ip addresses.
+    if len(rw) > 1:
+        rw -= _default_vast_policy
+
+    if len(ro) > 1:
+        rw -= _default_vast_policy
+
+    return {
+        'nfs_read_write': list(rw),
+        'nfs_read_only': list(ro)
+        }
 
 
 def validate_access_rules(access_rules):
