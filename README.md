@@ -16,6 +16,7 @@ First of all, you should have the appropriate version of Opestack installed.
 
 - [Rocky](https://docs.openstack.org/rocky/) - corresponds to the `0.3` patch version
 - [Stein](https://docs.openstack.org/stein/index.html) - corresponds to the `0.4` patch version
+- [Train](https://docs.openstack.org/train/index.html) - corresponds to the `0.5` patch version
 
 
 1. Download the appropriate patch file from the releases page and apply using the `patch` command:
