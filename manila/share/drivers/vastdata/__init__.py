@@ -16,6 +16,7 @@
 
 import re
 import socket
+from enum import IntEnum
 from contextlib import contextmanager
 import random
 
@@ -51,6 +52,9 @@ OPTS = [
         'vast_mgmt_password',
         help='Password for VAST management',
         secret=True),
+    cfg.StrOpt(
+        'vast_load_balancing', default='random', # random or roundrobin
+        help='VAST vip pools management strategy'),
 ]
 
 CONF = cfg.CONF
@@ -61,11 +65,18 @@ _MANILA_TO_VAST_ACCESS_LEVEL = {
     constants.ACCESS_LEVEL_RO: 'nfs_read_only',
 }
 
+
+class VipPoolManagementStrategy(IntEnum):
+    RANDOM = 1
+    ROUNDROBIN = 2
+
+
 RE_IS_IP = re.compile(r"\d+\.\d+\.\d+\.\d+")
 
 
 class VASTShareDriver(driver.ShareDriver):
     VERSION = '1.0'  # driver version
+    _vip_round_robin_idx = 1
 
     def __init__(self, *args, **kwargs):
         super(VASTShareDriver, self).__init__(False, *args, **kwargs)
@@ -78,6 +89,12 @@ class VASTShareDriver(driver.ShareDriver):
         self._host = self.configuration.vast_mgmt_host
         self._vippool_name = self.configuration.vast_vippool_name
         self._root_export = self.configuration.vast_root_export
+        try:
+            self._load_balancing = VipPoolManagementStrategy[str(self.configuration.vast_load_balancing).upper()]
+        except KeyError:
+            msg = ("%s is invalid - falling back on 'RANDOM' VIP-Pool load-balancing strategy") % self.configuration.vast_load_balancing
+            LOG.exception(msg)
+            self._load_balancing = VipPoolManagementStrategy.RANDOM
 
         self.vms_session = RESTSession(base_url="https://{}/api".format(self._host), auth=auth, ssl_verify=False)
         try:
@@ -103,8 +120,7 @@ class VASTShareDriver(driver.ShareDriver):
 
     @contextmanager
     def _mounted_root(self):
-        vips = self._get_vips()
-        vip = random.choice(vips).ip
+        vip = self._get_vip()
         mp = "/tmp/manila/{}".format(vip)
         utils.execute("mkdir", "-p", mp)
         utils.execute("mount", "-t", "nfs", "{}:{}".format(vip, self._root_export), mp, run_as_root=True)
@@ -164,6 +180,17 @@ class VASTShareDriver(driver.ShareDriver):
             raise exception.ManilaException("VIP Pool '%s' does not exist, or has no IPs" % self._vippool_name)
         return vips
 
+    def _get_vip(self):
+        """Get vips by name and choose one from available according to load balancing strategy"""
+        vips = self._get_vips()
+        if self._load_balancing == VipPoolManagementStrategy.RANDOM:
+            return random.choice(vips)
+        elif self._load_balancing == VipPoolManagementStrategy.ROUNDROBIN:
+            self._vip_round_robin_idx = (self._vip_round_robin_idx + 1) % len(vips)
+            return vips[self._vip_round_robin_idx]
+        else:
+            raise ValueError("Invalid load balancing strategy {strategy}".format(strategy=self._load_balancing))
+
     def _get_quota(self, share_id):
         quotas = self.vms_session.quotas(name__contains=share_id)
         if not quotas:
@@ -188,12 +215,10 @@ class VASTShareDriver(driver.ShareDriver):
             raise exception.ShareBackendException(message="Too many policy found with name %s" % share_id)
         return policy[0]
 
-    def ensure_share(self, context, share, share_server=None):
+    def _prepare_share(self, share):
         share_proto = share['share_proto']
         if share_proto != 'NFS':
             raise exception.InvalidShare(reason=_('Invalid NAS protocol supplied: %s.' % share_proto))
-
-        vips = self._get_vips()
 
         share_id = share['id']
         requested_capacity = share['size'] * units.Gi
@@ -218,8 +243,12 @@ class VASTShareDriver(driver.ShareDriver):
         if not export:
             data = dict(name=share_id, path=path, create_dir=True, policy_id=policy.id, protocols=['NFS'])
             self.vms_session.post("views", data=data)
-        elif not export.policy == share_id:
-            self.vms_session.patch("views/{}".format(export.id), data=dict(policy_id=policy.id))
+
+        return path, quota
+
+    def ensure_share(self, context, share, share_server=None):
+        path, quota = self._prepare_share(share)
+        vips = self._get_vips()
 
         return [dict(
             path='{vip.ip}:{path}'.format(vip=vip, path=path),
@@ -228,7 +257,13 @@ class VASTShareDriver(driver.ShareDriver):
         ) for vip in vips]
 
     def create_share(self, context, share, share_server=None):
-        return self.ensure_share(context, share, share_server)[0]
+        vip = self._get_vip()
+        path, quota = self._prepare_share(share)
+        return dict(
+            path='{vip.ip}:{path}'.format(vip=vip, path=path),
+            metadata=dict(quota_id=quota.id),
+            is_admin_only=False,
+        )
 
     def delete_share(self, context, share, share_server=None):
         """Called to delete a share"""
