@@ -76,7 +76,7 @@ manila access-list vast-share1
 
 # delete share and snapshot
 manila delete vast-share1
-manila snapshot-delete vast-share1
+manila snapshot-delete vast-snap1
 ```
 
 ## Troubleshooting
