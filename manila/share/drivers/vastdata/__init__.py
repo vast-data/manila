@@ -33,7 +33,6 @@ vast_vippool_name = vippool-1
 vast_root_export = manila
 vast_mgmt_user = admin
 vast_mgmt_password = 123456
-
 """
 
 import re
