@@ -1,7 +1,8 @@
-# from https://github.com/real-easypy/easypy
+from ipaddress import summarize_address_range, ip_address
 
 
 class Bunch(dict):
+    # from https://github.com/real-easypy/easypy
 
     __slots__ = ("__stop_recursing__",)
 
@@ -125,3 +126,16 @@ def bunchify(d=None, **kw):
     if kw:
         d.update(bunchify(kw))
     return d
+
+
+def generate_ip_range(ip_ranges):
+    """
+    Generate list of ips from provided ip ranges.
+    `ip_ranges` should be list of ranges where fist ip in range represents start ip and second is end ip
+    eg: [["15.0.0.1", "15.0.0.4"], ["10.0.0.27", "10.0.0.30"]]
+    """
+    return [
+        ip.compressed
+        for start_ip, end_ip in ip_ranges for net in summarize_address_range(ip_address(start_ip), ip_address(end_ip))
+        for ip in net
+    ]

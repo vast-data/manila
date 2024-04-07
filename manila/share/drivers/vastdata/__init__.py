@@ -35,11 +35,7 @@ vast_mgmt_user = admin
 vast_mgmt_password = 123456
 """
 
-import re
 import socket
-from contextlib import contextmanager
-import random
-
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import units
@@ -50,8 +46,8 @@ from manila.i18n import _
 from manila.share import driver
 from manila import utils
 
-from .rest import RESTSession, VastApiException
-from .bunch import Bunch
+from manila.share.drivers.vastdata.rest import RestApi
+from manila.share.drivers.vastdata.driver_util import Bunch
 
 LOG = logging.getLogger(__name__)
 
@@ -60,85 +56,59 @@ OPTS = [
         'vast_mgmt_host',
         help='Hostname or IP address VAST storage system management VIP.'),
     cfg.StrOpt(
-        'vast_vippool_name', default="manila",
+        'vast_vippool_name',
         help='Name of Virtual IP pool'),
     cfg.StrOpt(
         'vast_root_export', default="manila",
-        help='Name of Virtual IP pool'),
+        help='Base path for shares'),
     cfg.StrOpt(
         'vast_mgmt_user',
         help='Username for VAST management'),
     cfg.StrOpt(
         'vast_mgmt_password',
         help='Password for VAST management',
-        secret=True),
+        secret=True)
 ]
 
 CONF = cfg.CONF
 CONF.register_opts(OPTS)
 
-_MANILA_TO_VAST_ACCESS_LEVEL = {
+MANILA_TO_VAST_ACCESS_LEVEL = {
     constants.ACCESS_LEVEL_RW: 'nfs_read_write',
     constants.ACCESS_LEVEL_RO: 'nfs_read_only',
 }
-
-RE_IS_IP = re.compile(r"\d+\.\d+\.\d+\.\d+")
 
 
 class VASTShareDriver(driver.ShareDriver):
     VERSION = '1.0'  # driver version
 
     def __init__(self, *args, **kwargs):
-        super(VASTShareDriver, self).__init__(False, *args, **kwargs)
+        super().__init__(False, *args, **kwargs)
         self.configuration.append_config_values(OPTS)
 
     def do_setup(self, context):
         """Driver initialization"""
-
-        auth = (self.configuration.vast_mgmt_user, self.configuration.vast_mgmt_password)
-        self._host = self.configuration.vast_mgmt_host
-        self._vippool_name = self.configuration.vast_vippool_name
-        self._root_export = self.configuration.vast_root_export
-
-        self.vms_session = RESTSession(base_url="https://{}/api".format(self._host), auth=auth, ssl_verify=False)
-        try:
-            metrics_spec = self.vms_session.metrics()
-        except VastApiException as ex:
-            msg = _("Exception when logging into the array: %s\n") % ex
-            LOG.exception(msg)
-            raise exception.ManilaException(message=msg)
-
-        self._metrics_spec = {m.fqn: m for m in metrics_spec}
         backend_name = self.configuration.safe_get('share_backend_name')
         self._backend_name = backend_name or self.__class__.__name__
+        self._vippool_name = self.configuration.vast_vippool_name
+        self._root_export = "/" + self.configuration.vast_root_export.strip("/")
 
-        manila_view = "manila"
-        export = self._get_export(manila_view)
-        if not export:
-            policy = self._get_policy("default")
-            data = dict(name=manila_view, path=self._root_export, policy_id=policy.id, create_dir=True,
-                        protocols=['NFS'])
-            self.vms_session.post("views", data=data)
-
+        username = self.configuration.vast_mgmt_user
+        password = self.configuration.vast_mgmt_password
+        host = self.configuration.vast_mgmt_host
+        self.rest = RestApi(host, username, password, False, self.VERSION)
         LOG.debug('setup complete')
-
-    @contextmanager
-    def _mounted_root(self):
-        vips = self._get_vips()
-        vip = random.choice(vips).ip
-        mp = "/tmp/manila/{}".format(vip)
-        utils.execute("mkdir", "-p", mp)
-        utils.execute("mount", "-t", "nfs", "{}:{}".format(vip, self._root_export), mp, run_as_root=True)
-        try:
-            yield mp
-        finally:
-            utils.execute("umount", mp, run_as_root=True)
-            utils.execute("rmdir", mp, run_as_root=True)
 
     def _update_share_stats(self, data=None):
         """Retrieve stats info from share group."""
-        metrics = self._get_capacity_metrics()
-
+        metrics_list = [
+            'Capacity,drr',
+            'Capacity,logical_space',
+            'Capacity,logical_space_in_use',
+            'Capacity,physical_space',
+            'Capacity,physical_space_in_use',
+        ]
+        metrics = self.rest.capacity_metrics.get(metrics_list)
         data = dict(
             share_backend_name=self._backend_name,
             vendor_name='VAST STORAGE',
@@ -153,135 +123,48 @@ class VASTShareDriver(driver.ShareDriver):
             mount_snapshot_support=False,
             revert_to_snapshot_support=False)
 
-        super(VASTShareDriver, self)._update_share_stats(data)
+        super()._update_share_stats(data)
 
-    def _get_capacity_metrics(self):
-        metrics = [
-            'Capacity,drr',
-            'Capacity,logical_space',
-            'Capacity,logical_space_in_use',
-            'Capacity,physical_space',
-            'Capacity,physical_space_in_use',
-        ]
-
-        ret = self.vms_session.get("monitors/ad_hoc_query", params=dict(
-            prop_list=metrics, object_type='cluster', time_frame='1m'))
-        last_sample = ret.data[-1]
-        return Bunch({
-            name.partition(",")[-1]: value
-            for name, value in zip(ret.prop_list, last_sample)})
-
-    def _to_volume_path(self, manila_share, root=None):
+    def _to_volume_path(self, share_id, root=None):
         if not root:
             root = self._root_export
-        share_id = manila_share['id']
-        return "{root}/manila-{share_id}".format(**locals())
-
-    def _get_vips(self):
-        vips = [
-            vip for vip in self.vms_session.vips()
-            if vip.vippool == self._vippool_name]
-        if not vips:
-            raise exception.ManilaException("VIP Pool '%s' does not exist, or has no IPs" % self._vippool_name)
-        return vips
-
-    def _get_quota(self, share_id):
-        quotas = self.vms_session.quotas(name__contains=share_id)
-        if not quotas:
-            return
-        if len(quotas) > 1:
-            raise exception.ShareBackendException(message="Too many quotas found with name %s" % share_id)
-        return quotas[0]
-
-    def _get_export(self, share_id):
-        exports = self.vms_session.views(name=share_id)
-        if not exports:
-            return
-        if len(exports) > 1:
-            raise exception.ShareBackendException(message="Too many exports found with name %s" % share_id)
-        return exports[0]
-
-    def _get_policy(self, share_id):
-        policy = self.vms_session.viewpolicies(name=share_id)
-        if not policy:
-            return
-        if len(policy) > 1:
-            raise exception.ShareBackendException(message="Too many policy found with name %s" % share_id)
-        return policy[0]
+        return f"{root}/manila-{share_id}"
 
     def ensure_share(self, context, share, share_server=None):
         share_proto = share['share_proto']
         if share_proto != 'NFS':
-            raise exception.InvalidShare(reason=_('Invalid NAS protocol supplied: %s.' % share_proto))
+            raise exception.InvalidShare(reason=_('Invalid NAS protocol supplied: {}.'.format(share_proto)))
 
-        vips = self._get_vips()
+        vips = self.rest.vip_pools.vips(pool_name=self._vippool_name)
 
         share_id = share['id']
         requested_capacity = share['size'] * units.Gi
-        path = self._to_volume_path(share)
-
-        policy = self._get_policy(share_id)
-        if not policy:
-            data = dict(name=share_id)
-            policy = self.vms_session.post("viewpolicies", data=data)
-
-        quota = self._get_quota(share_id)
-        if not quota:
-            data = dict(name=share_id, path=path, create_dir=True, hard_limit=requested_capacity)
-            quota = self.vms_session.post("quotas", data=data)
-            LOG.debug("Quota created: %s -> %s", quota.id, path)
-        elif quota.hard_limit != requested_capacity:
+        path = self._to_volume_path(share_id)
+        policy = self.rest.view_policies.ensure(name=share_id)
+        quota = self.rest.quotas.ensure(name=share_id, path=path, create_dir=True, hard_limit=requested_capacity)
+        if quota.hard_limit != requested_capacity:
             raise exception.ManilaException(
-                "Share already exists with different capacity "
-                "(requested={requested_capacity}, exists={quota.hard_limit})".format(**locals()))
+                f"Share already exists with different capacity (requested={requested_capacity}, exists={quota.hard_limit})")
 
-        export = self._get_export(share_id)
-        if not export:
-            data = dict(name=share_id, path=path, create_dir=True, policy_id=policy.id, protocols=['NFS'])
-            self.vms_session.post("views", data=data)
-        elif not export.policy == share_id:
-            self.vms_session.patch("views/{}".format(export.id), data=dict(policy_id=policy.id))
-
-        return [dict(
-            path='{vip.ip}:{path}'.format(vip=vip, path=path),
-            metadata=dict(quota_id=quota.id),
-            is_admin_only=False,
-        ) for vip in vips]
+        view = self.rest.views.ensure(name=share_id, path=path, policy_id=policy.id)
+        if not view.policy == share_id:
+            self.rest.views.update(view.id, policy_id=policy.id)
+        return [dict(path=f"{vip}:{path}", is_admin_only=False) for vip in vips]
 
     def create_share(self, context, share, share_server=None):
         return self.ensure_share(context, share, share_server)[0]
 
     def delete_share(self, context, share, share_server=None):
         """Called to delete a share"""
-
         share_id = share['id']
-
-        export = self._get_export(share_id)
-        if export:
-            self.vms_session.delete("views/{export.id}".format(**locals()))
-        else:
-            LOG.warning("export %s not found on VAST, skipping delete", share_id)
-
-        quota = self._get_quota(share_id)
-        if quota:
-            self.vms_session.delete("quotas/{quota.id}".format(**locals())),
-        else:
-            LOG.warning("quota %s not found on VAST, skipping delete", share_id)
-
-        policy = self._get_policy(share_id)
-        if policy:
-            self.vms_session.delete("viewpolicies/{policy.id}".format(**locals())),
-        else:
-            LOG.warning("policy %s not found on VAST, skipping delete", share_id)
-
-        with self._mounted_root() as mount:
-            src = self._to_volume_path(share, mount)
-            dst = "{}/deleted/{}".format(mount, share_id)
-            utils.execute("mkdir", "-p", "{}/deleted".format(mount), run_as_root=True)
-            utils.execute("mv", src, dst, run_as_root=True)
+        src = self._to_volume_path(share_id)
+        LOG.info(f"deleting '{src}'")
+        self.rest.folders.delete(path=src)
+        self.rest.views.delete(name=share_id)
+        self.rest.quotas.delete(name=share_id)
+        self.rest.view_policies.delete(name=share_id)
 
     def update_access(self, context, share, access_rules, add_rules, delete_rules, share_server=None):
-
         if not (add_rules or delete_rules):
             add_rules = access_rules
 
@@ -291,38 +174,26 @@ class VASTShareDriver(driver.ShareDriver):
         validate_access_rules(add_rules)
 
         share_id = share['id']
+        export = self._to_volume_path(share_id)
 
-        export = self._to_volume_path(share)
-
-        LOG.info("Changing access on %s", share_server)
+        LOG.info(f"changing access on {share_server}")
         data = {"name": share_id, "nfs_no_squash": ["*"], "nfs_root_squash": ["*"]}
 
-        policy = self._get_policy(share_id)
+        policy = self.rest.view_policies.one(name=share_id)
         if add_rules:
             policy_rules = policy_payload_from_rules(rules=add_rules, policy=policy, action="update")
             data.update(policy_rules)
-
-            LOG.info("Changing access on {0}. Rules: {1}".format(export, policy_rules))
+            LOG.info(f"changing access on {export}. Rules: {policy_rules}")
             if policy:
-                self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
+                self.rest.view_policies.update(policy.id, **data)
             else:
-                self.vms_session.post("viewpolicies", data=data)
+                self.rest.view_policies.create(**data)
 
         elif delete_rules:
             policy_rules = policy_payload_from_rules(rules=delete_rules, policy=policy, action="deny")
-            LOG.info("Changing access on {0}. Rules: {1}".format(export, policy_rules))
+            LOG.info(f"changing access on {export}. Rules: {policy_rules}")
             data.update(policy_rules)
-
-            self.vms_session.patch("viewpolicies/{}".format(policy.id), data=data)
-
-    def _resize_share(self, share, new_size):
-        share_id = share['id']
-        quota = self._get_quota(share_id)
-        if not quota:
-            raise exception.ShareNotFound(reason="Share not found", share_id=share_id)
-
-        requested_capacity = new_size * units.Gi
-        self.vms_session.patch("quotas/{}".format(quota.id), data=dict(hard_limit=requested_capacity))
+            self.rest.view_policies.update(policy.id, **data)
 
     def extend_share(self, share, new_size, share_server=None):
         """uses resize_share to extend a share"""
@@ -334,41 +205,43 @@ class VASTShareDriver(driver.ShareDriver):
 
     def create_snapshot(self, context, snapshot, share_server):
         """Is called to create snapshot."""
-        path = self._to_volume_path(dict(id=snapshot['share_instance_id']))
-        LOG.info("Creating snapshot for %s", path)
-        snapshot = self.vms_session.post("snapshots", data=dict(
-            path=path,
-            name=snapshot['name'],
-        ))
+        path = self._to_volume_path(snapshot['share_instance_id'])
+        self.rest.snapshots.create(path=path, name=snapshot['name'])
 
     def delete_snapshot(self, context, snapshot, share_server):
         """Is called to remove share."""
-        name = snapshot['name']
-        snapshots = self.vms_session.snapshots(name=name)
-        assert len(snapshots) == 1, "Too many snapshots with name {!r}".format(name)
-        self.vms_session.delete("snapshots/{}".format(snapshots[0].id))
+        self.rest.snapshots.delete(name=snapshot["name"])
 
     def get_network_allocations_number(self):
         return 0
+
+    def _resize_share(self, share, new_size):
+        share_id = share['id']
+        quota = self.rest.quotas.one(name=share_id)
+        if not quota:
+            raise exception.ShareNotFound(reason="Share not found", share_id=share_id)
+
+        requested_capacity = new_size * units.Gi
+        self.rest.quotas.update(quota.id, hard_limit=requested_capacity)
 
 
 def policy_payload_from_rules(rules, policy, action):
     """Convert list of manila rules into vast compatible payload for updating/creating policy."""
 
     def reverse_lookup(dns):
-        if RE_IS_IP.match(dns):
+        if utils.is_valid_ip_address(dns, [4]):
             return [dns]
         try:
             hostname, aliaslist, ipaddrlist = socket.gethostbyname_ex(dns)
         except socket.gaierror as exc:
-            LOG.error("Failed to resolve host '%s': %s (ignoring)", dns, exc)
+            LOG.error(f"failed to resolve host '{dns}': {exc} (ignoring)")
             return []
 
-        LOG.info("resolved %s: %s", hostname, ", ".join(ipaddrlist))
+        LOG.info(f"resolved {hostname}: {', '.join(ipaddrlist)}")
         return ipaddrlist
 
     hosts = {
-        _MANILA_TO_VAST_ACCESS_LEVEL[rule['access_level']]:
+        MANILA_TO_VAST_ACCESS_LEVEL[rule['access_level']]:
             {ip for ip in reverse_lookup(rule['access_to'])}
         for rule in rules or []
     }
@@ -404,14 +277,14 @@ def policy_payload_from_rules(rules, policy, action):
 
 def validate_access_rules(access_rules):
     allowed_types = {'ip'}
-    allowed_levels = _MANILA_TO_VAST_ACCESS_LEVEL.keys()
+    allowed_levels = MANILA_TO_VAST_ACCESS_LEVEL.keys()
 
     for access in (access_rules or []):
         access_type = access['access_type']
         access_level = access['access_level']
         if access_type not in allowed_types:
-            reason = _("Only %s access type allowed.") % (
-                ', '.join(tuple(["'%s'" % x for x in allowed_types])))
+            reason = _("Only {} access type allowed.").format(
+                ', '.join(tuple([f"'{x}'" for x in allowed_types])))
             raise exception.InvalidShareAccess(reason=reason)
         if access_level not in allowed_levels:
             raise exception.InvalidShareAccessLevel(level=access_level)
