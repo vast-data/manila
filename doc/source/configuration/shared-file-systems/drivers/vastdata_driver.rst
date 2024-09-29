@@ -2,11 +2,11 @@
 Vastdata Share Driver
 ====================================
 
-Vastdata can be used as a storage back end for the OpenStack Shared
+VASTData Share Driver can be used as a storage back end for the OpenStack Shared
 File System service. Shares in the Shared File System service are
-mapped 1:1 to Vastdata volumes. Access is provided via NFS protocol
-and IP-based authentication. The `Vastdata <https://www.vastdata.com>`__
-Manila driver uses the Vastdata API service.
+mapped 1:1 to VASTData volumes. Access is provided via NFS protocol
+and IP-based authentication. The `VASTData <https://www.vastdata.com>`__
+Manila driver uses the VASTData API service.
 
 Supported shared filesystems
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -23,8 +23,10 @@ The following operations are supported:
 -  Delete a share.
 
 -  Allow share access.
+    - IP access type is supported.
+    - Read/write and read-only access are supported.
 
--  Deny share access.
+- Deny share access.
 
 - Extend a share.
 
@@ -34,7 +36,7 @@ The following operations are supported:
 Requirements
 ~~~~~~~~~~~~
 
--  Trash API must be enabled on Vastdata cluster.
+-  Trash API must be enabled on VASTData cluster.
 
 Driver options
 ~~~~~~~~~~~~~~
@@ -45,11 +47,12 @@ share driver.
 .. include:: ../../tables/manila-vastdata.inc
 
 
-Vastdata driver configuration example
+VASTData driver configuration example
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The following parameters shows a sample subset of the ``manila.conf`` file,
-which configures two backends and the relevant ``[DEFAULT]`` options. A real
+which configures VASTData manila backend
+and the relevant ``[DEFAULT]`` options. A real
 configuration would include additional ``[DEFAULT]`` options and additional
 sections that are not discussed in this document:
 
@@ -72,10 +75,66 @@ sections that are not discussed in this document:
    vast_root_export = {root_export}
 
 
+Restart of ``manila-share`` service is needed for the configuration
+changes to take effect.
+
+
+Pre-configurations for share support
+--------------------------------------------------
+
+To create a file share you need to:
+
+Create the share type:
+
+    .. code-block:: console
+
+        openstack share type create ${share_type_name} False \
+            --extra-specs share_backend_name=${share_backend_name}
+
+Create NFS share:
+
+    .. code-block:: console
+
+        openstack share create NFS ${size} --name ${share_name} --share-type ${share_type_name}
+
+Pre-Configurations for Snapshot support
+--------------------------------------------------
+
+The following extra specifications need to be configured with share type.
+
+- snapshot_support = True
+
+For new share type, these extra specifications can be set directly when creating share type:
+
+    .. code-block:: console
+
+        openstack share type create ${share_type_name} false \
+            --snapshot-support=true \
+            --extra-specs share_backend_name=${share_backend_name}
+
+Or you can update already existing share type with command:
+
+    .. code-block:: console
+
+        openstack share type set ${share_type_name} --extra-specs snapshot_support=True
+
+
+To snapshot a share and create share from the snapshot
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+You need create a share from share type
+that has extra specifications(snapshot_support=True).
+Then snapshot the share with command:
+
+    .. code-block:: console
+
+        openstack share snapshot create ${source_share_name} --name ${target_snapshot_name}
+
+
 Restrictions
 ------------
 
-The Vastdata driver has the following restrictions:
+The VASTData driver has the following restrictions:
 
 - Only IP access type is supported for NFS.
 
